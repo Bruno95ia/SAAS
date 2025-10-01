@@ -1,0 +1,36 @@
+[tool.black]
+line-length = 100
+target-version = ["py313"]  # seu Python atual
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.venv
+  | build
+  | dist
+  | __pycache__
+)/
+'''
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+# Conjuntos de regras:
+# E,F: pycodestyle/pyflakes (erros comuns)
+# I: isort (organiza imports)
+# B: flake8-bugbear (más práticas)
+# UP: pyupgrade (moderniza sintaxe)
+# SIM: flake8-simplify (simplificações)
+# N: pep8-naming (nomes)
+lint.select = ["E", "F", "I", "B", "UP", "SIM", "N"]
+
+# Ignorar avisos de docstring por enquanto e “line too long” do pycodestyle (Black já cuida).
+lint.ignore = ["D", "E501"]
+
+# Trate estes pacotes como “first-party” para ordenar imports
+lint.isort.known-first-party = ["inference", "signals", "ioutils", "privacy", "utils"]
+
+# Formatação pelo Ruff (opcional; Black continua como principal)
+format.quote-style = "double"
+format.indent-style = "space"
+format.skip-magic-trailing-comma = false

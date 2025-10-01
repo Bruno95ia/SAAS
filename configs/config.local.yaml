@@ -1,0 +1,25 @@
+video:
+  source: "./data"        # pasta com vídeos locais
+  target_fps: 12
+  record: true            # salva vídeo anotado
+  frame_skip: 1
+  rtsp:
+    transport: "tcp"
+    reconnect: true
+    backoff_s: [1, 2, 5, 10]
+    stimeout_ms: 5000000
+    buffer_size: 1024
+
+pose:
+  model: yolov8n-pose.pt
+  conf: 0.5
+  device: cpu
+
+logic:
+  min_consecutive_frames: 5
+  min_clear_frames: 10
+  alert_cooldown_s: 30
+
+runtime:
+  metrics_port: 8000
+  

@@ -1,0 +1,27 @@
+video:
+  # Fonte de vídeo: pode ser um arquivo .mp4 ou stream RTSP
+  # Exemplo RTSP: "rtsp://USUARIO:SENHA@IP_DA_CAMERA:554/stream1"
+  source: "./data"        
+  target_fps: 12
+  record: true            # Se false, não salva vídeo anotado (útil em RTSP)
+  frame_skip: 1           # Processar todos os frames; aumente p/ reduzir carga
+
+  rtsp:
+    transport: "tcp"      # Força TCP para reduzir perdas
+    reconnect: true       # Reconeção automática
+    backoff_s: [1, 2, 5, 10]  # Intervalos progressivos de reconexão
+    stimeout_ms: 5000000  # Timeout de socket (5s)
+    buffer_size: 1024     # Buffer (KB)
+
+pose:
+  model: yolov8n-pose.pt  # Modelo de pose
+  conf: 0.5               # Confiança mínima para keypoints
+  device: cpu             # Opções: cpu, cuda, mps (Apple Silicon)
+
+logic:
+  min_consecutive_frames: 5    # Frames consecutivos para confirmar queda
+  min_clear_frames: 10         # Frames p/ limpar estado de queda
+  alert_cooldown_s: 30         # Intervalo mínimo entre alertas (segundos)
+
+runtime:
+  metrics_port: 8000           # Porta p/ Prometheus/monitoramento

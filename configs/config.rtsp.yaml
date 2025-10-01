@@ -1,0 +1,24 @@
+video:
+  source: "rtsp://USUARIO:SENHA@IP_DA_CAMERA:554/stream1"
+  target_fps: 12
+  record: false           # em live, normalmente não gravamos o .mp4
+  frame_skip: 1
+  rtsp:
+    transport: "tcp"
+    reconnect: true
+    backoff_s: [1, 2, 5, 10]
+    stimeout_ms: 5000000
+    buffer_size: 1024
+
+pose:
+  model: yolov8n-pose.pt
+  conf: 0.5
+  device: cpu   # mude para mps (Mac) ou cuda (NVIDIA) se quiser
+
+logic:
+  min_consecutive_frames: 5
+  min_clear_frames: 10
+  alert_cooldown_s: 30
+
+runtime:
+  metrics_port: 8000

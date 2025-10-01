@@ -1,0 +1,24 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# MacOS
+.DS_Store
+
+# Logs e temporários
+*.log
+*.zip
+*.tgz
+~$*
+
+# Dados pesados
+data/
+datasets/
+runs/
+*.pt  # modelos YOLO ou Torch
+
+# Virtual env
+.venv/
+env/
+venv/
