@@ -1,11 +1,15 @@
 from typing import Optional, Dict, Any, List
 import os
-from fastapi import FastAPI, WebSocket, Header, HTTPException, Depends
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from .store import Alert, insert_alert, recent
-from fastapi.staticfiles import StaticFiles
+import requests
 from pathlib import Path
+
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from .clipper import save_clip_from_file
+from .store import Alert, insert_alert, recent
 
 API_KEY = os.getenv("SAAS_API_KEY", "dev-key")  # defina em prod!
 
@@ -62,9 +66,6 @@ async def ws_alerts(ws: WebSocket):
             subscribers.remove(ws)
 
             
-import os, requests
-from saas.clipper import save_clip_from_file
-
 API = os.getenv("SAAS_API_URL", "http://127.0.0.1:8000")
 KEY = os.getenv("SAAS_API_KEY", "minha-chave-forte")
 

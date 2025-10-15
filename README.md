@@ -59,3 +59,9 @@ Saídas:
 Fluxo de evolução
 
 Anotar → Converter → Treinar → Testar → Afinar → Repetir
+
+---
+
+## 📡 Detecção em tempo real e alertas
+
+O fluxo completo de captura RTSP → detecção → geração de clipe → envio de alerta → exibição no painel está documentado em [`docs/fluxo_quedas.md`](docs/fluxo_quedas.md).
