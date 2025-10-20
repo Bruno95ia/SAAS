@@ -48,7 +48,7 @@ def main() -> None:
         "warning",
         "-rtsp_transport",
         "tcp",
-        "-stimeout",
+        "-timeout",
         "5000000",
         "-i",
         "0" if args.rtsp.lower() == "webcam" else args.rtsp,
