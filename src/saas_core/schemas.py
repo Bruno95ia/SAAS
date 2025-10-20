@@ -30,6 +30,7 @@ class CameraStatus(BaseModel):
     status: str
     fps: float
     last_event: Optional[datetime]
+    last_error: Optional[str] = None
 
 
 class EventRead(BaseModel):

@@ -54,12 +54,18 @@ services:
       - saas-net
 
   saas-data:
-    image: python:3.11-slim
+    build:
+      context: .
+      dockerfile: Dockerfile.data
     container_name: saas-data
+    restart: unless-stopped
     profiles: ["data"]
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      DATA_SYNC_INTERVAL: ${DATA_SYNC_INTERVAL:-3600}
     volumes:
       - /mnt/data/saas_data:/data
-    command: ["sleep", "infinity"]
     networks:
       - saas-net
 

@@ -36,6 +36,9 @@ Os serviços compartilham `/mnt/data/saas_data` para logs, clips e datasets, e o
    DATA_DIR=/data
    ROBOFLOW_API_KEY=   # opcional para sincronizar datasets
    HF_TOKEN=           # opcional para datasets no Hugging Face
+   ROBOFLOW_SOURCES=   # lista opcional workspace/projeto:versao separada por vírgula
+   HUGGINGFACE_SOURCES= # lista opcional repo:arquivo separada por vírgula
+   DATA_SYNC_INTERVAL=3600  # segundos entre sincronizações do contêiner saas-data
    ```
 3. Ajuste permissões do diretório `/mnt/data/saas_data` caso necessário (logs e clips são escritos em `/mnt/data/saas_data`).
 
@@ -59,6 +62,7 @@ Isso provisiona automaticamente os serviços `saas-db`, `saas-api` e `saas-paine
 | ------ | --------------------- | --------- |
 | POST   | `/cameras`            | Cadastra uma câmera RTSP |
 | GET    | `/cameras`            | Lista câmeras cadastradas |
+| GET    | `/cameras/status`     | Situação atual das câmeras (ativa, offline, erro) |
 | POST   | `/cameras/{id}/start` | Inicia captura e detecção |
 | POST   | `/cameras/{id}/stop`  | Pausa captura |
 | GET    | `/stream/{id}`        | Stream MJPEG com boxes/labels |
@@ -79,7 +83,7 @@ curl -X POST http://localhost:8000/cameras \
   * FPS médio, tempo médio entre quedas, uso de CPU/GPU e espaço livre.
   * Gráfico de eventos por hora (últimas 24h).
   * Histórico das 10 últimas quedas com exportação CSV.
-  * Controle para adicionar/iniciar/parar câmeras.
+  * Controle para adicionar/iniciar/parar câmeras com indicação de status (ativa, offline, erro) e último evento.
   * Visualização ao vivo utilizando o endpoint `/stream/{id}`.
 
 ## 🧠 IA de Detecção
@@ -91,7 +95,8 @@ curl -X POST http://localhost:8000/cameras \
 
 ## 🗄️ Banco de Dados & ORM
 
-* PostgreSQL 15 com SQLAlchemy 2.0 e migração automática (criação de schema na inicialização).
+* PostgreSQL 15 com SQLAlchemy 2.0.
+* Migrações Alembic configuradas em `alembic/` com script inicial `0001_create_core_tables.py` (rode `alembic upgrade head` para aplicar).
 * Tabelas principais:
   * `cameras`: cadastro de câmeras RTSP.
   * `events`: registros de eventos de queda, timestamp e score.
@@ -107,6 +112,13 @@ sync_roboflow("org/projeto", "version")
 sync_huggingface("autor/dataset", "path/arquivo.zip")
 ```
 Configure `ROBOFLOW_API_KEY` ou `HF_TOKEN` no `.env` para habilitar.
+
+### Contêiner `saas-data`
+
+Ative com `docker compose --profile data up -d` para executar sincronizações automáticas usando o script `data_sync_service`.
+
+* Respeita as variáveis `ROBOFLOW_SOURCES`, `HUGGINGFACE_SOURCES` e `DATA_SYNC_INTERVAL`.
+* Escreve os arquivos baixados em `/mnt/data/saas_data/datasets` reutilizando a mesma configuração de logs e diretórios do restante da aplicação.
 
 ## ✅ Checklist de Validação
 

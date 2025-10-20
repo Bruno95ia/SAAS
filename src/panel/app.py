@@ -48,14 +48,18 @@ def fetch_metrics() -> Dict[str, Any]:
     return data
 
 
-def fetch_cameras() -> List[Dict[str, Any]]:
+def fetch_camera_statuses() -> List[Dict[str, Any]]:
     try:
-        response = requests.get(f"{API_URL}/cameras", timeout=10)
+        response = requests.get(f"{API_URL}/cameras/status", timeout=10)
         response.raise_for_status()
     except requests.RequestException as exc:
         st.sidebar.error(f"Falha ao carregar câmeras: {exc}")
         return []
-    return response.json()
+    cameras = response.json()
+    for camera in cameras:
+        if camera.get("last_event"):
+            camera["last_event"] = datetime.fromisoformat(camera["last_event"])
+    return cameras
 
 
 def control_cameras():
@@ -77,10 +81,26 @@ def control_cameras():
                 else:
                     st.error(f"Erro ao adicionar câmera: {response.text}")
 
-    cameras = fetch_cameras()
+    cameras = fetch_camera_statuses()
+    status_labels = {
+        "active": "🟢 Ativa",
+        "offline": "🟡 Offline",
+        "disabled": "⚪ Inativa",
+        "error": "🔴 Erro",
+    }
+
     for camera in cameras:
         col1, col2 = st.sidebar.columns([2, 1])
-        col1.markdown(f"**{camera['name']}**")
+        status_label = status_labels.get(camera.get("status"), camera.get("status", "-"))
+        fps_display = f"{camera.get('fps', 0.0):.1f} FPS"
+        last_event = camera.get("last_event")
+        last_event_display = last_event.strftime("%d/%m %H:%M") if isinstance(last_event, datetime) else "-"
+        tooltip = camera.get("last_error") or ""
+
+        col1.markdown(f"**{camera['name']}**  \n{status_label} • {fps_display}  \nÚltimo evento: {last_event_display}")
+        if tooltip:
+            col1.caption(f"Erro recente: {tooltip}")
+
         start_clicked = col2.button("▶", key=f"start-{camera['id']}")
         stop_clicked = col2.button("⏸", key=f"stop-{camera['id']}")
         if start_clicked:
@@ -88,6 +108,7 @@ def control_cameras():
                 response = requests.post(f"{API_URL}/cameras/{camera['id']}/start", timeout=10)
                 if response.ok:
                     st.sidebar.success(f"Câmera {camera['name']} iniciada")
+                    st.experimental_rerun()
                 else:
                     st.sidebar.error(f"Falha ao iniciar: {response.text}")
             except requests.RequestException as exc:
@@ -97,6 +118,7 @@ def control_cameras():
                 response = requests.post(f"{API_URL}/cameras/{camera['id']}/stop", timeout=10)
                 if response.ok:
                     st.sidebar.warning(f"Câmera {camera['name']} parada")
+                    st.experimental_rerun()
                 else:
                     st.sidebar.error(f"Falha ao parar: {response.text}")
             except requests.RequestException as exc:

@@ -62,6 +62,13 @@ def list_cameras():
         return cameras
 
 
+@app.get("/cameras/status", response_model=List[CameraStatus])
+def camera_status():
+    statuses = camera_manager.list_status()
+    statuses.sort(key=lambda item: item["id"])  # type: ignore[index]
+    return [CameraStatus(**status) for status in statuses]
+
+
 @app.post("/cameras/{camera_id}/start", response_model=CameraStatus)
 def start_camera(camera_id: int):
     with get_session() as session:
@@ -90,9 +97,10 @@ def stop_camera(camera_id: int):
             "id": camera_id,
             "name": camera.name if camera else "unknown",
             "enabled": False,
-            "status": "stopped",
+            "status": "disabled",
             "fps": 0.0,
             "last_event": None,
+            "last_error": None,
         }
     return CameraStatus(**status)
 

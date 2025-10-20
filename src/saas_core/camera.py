@@ -13,6 +13,8 @@ import numpy as np
 import psutil
 import torch
 
+from sqlalchemy import func
+
 from .config import get_settings
 from .detector import Detection, fall_detector
 from .db import get_session
@@ -36,6 +38,7 @@ class CameraRuntime:
     frame_queue: Deque[StreamFrame] = field(default_factory=lambda: deque(maxlen=settings.max_stream_backlog))
     fps_history: Deque[float] = field(default_factory=lambda: deque(maxlen=30))
     last_event_ts: Optional[datetime] = None
+    last_error: Optional[str] = None
 
 
 class CameraWorker:
@@ -48,7 +51,11 @@ class CameraWorker:
     def _open_capture(self) -> bool:
         logger.info("Opening camera %s", self.runtime.camera.name)
         self.capture = cv2.VideoCapture(self.runtime.camera.rtsp)
-        return self.capture.isOpened()
+        if not self.capture.isOpened():
+            self.runtime.last_error = "failed_to_open"
+            return False
+        self.runtime.last_error = None
+        return True
 
     def _write_clip(self, frames: List[np.ndarray], event: Event) -> Optional[str]:
         if not frames:
@@ -105,11 +112,13 @@ class CameraWorker:
             ret, frame = self.capture.read() if self.capture else (False, None)
             if not ret or frame is None:
                 logger.warning("Camera %s frame grab failed", self.runtime.camera.name)
+                self.runtime.last_error = "frame_grab_failed"
                 time.sleep(1)
                 continue
 
             detections = fall_detector.infer(frame)
             fall_detection = fall_detector.detect_fall(detections)
+            self.runtime.last_error = None
             frame_drawn = self._draw_detections(frame.copy(), detections)
             self._push_frame(frame_drawn)
 
@@ -188,9 +197,12 @@ class CameraManager:
             if runtime is None:
                 runtime = CameraRuntime(camera=camera)
                 self._runtimes[camera.id] = runtime
+            else:
+                runtime.camera = camera
             if runtime.running:
                 return
             runtime.running = True
+            runtime.last_error = None
             worker = CameraWorker(runtime)
             thread = threading.Thread(target=worker.run, daemon=True)
             runtime.thread = thread
@@ -204,6 +216,8 @@ class CameraManager:
                 runtime.running = False
                 if runtime.thread:
                     runtime.thread.join(timeout=5)
+                runtime.last_error = None
+                runtime.camera.enabled = False
                 logger.info("Camera %s stopped", runtime.camera.name)
 
     def enqueue_frame(self, camera_id: int, frame: StreamFrame) -> None:
@@ -230,11 +244,12 @@ class CameraManager:
             )
 
     def metrics(self) -> Dict[str, float]:
-        fps_values = [np.mean(runtime.fps_history) for runtime in self._runtimes.values() if runtime.fps_history]
-        active = sum(1 for runtime in self._runtimes.values() if runtime.running)
-        total = len(self._runtimes)
-        falls = 0
+        with self._lock:
+            runtimes = list(self._runtimes.values())
+        fps_values = [np.mean(runtime.fps_history) for runtime in runtimes if runtime.fps_history]
+        active = sum(1 for runtime in runtimes if runtime.running)
         with get_session() as session:
+            total = session.query(Camera).count()
             falls = session.query(Event).filter(Event.label == "fall").count()
         cpu_usage = psutil.cpu_percent()
         free = psutil.disk_usage(str(settings.storage.data_dir)).free / (1024 ** 3)
@@ -250,19 +265,67 @@ class CameraManager:
         }
 
     def list_status(self) -> List[Dict[str, Optional[float]]]:
-        statuses = []
-        for runtime in self._runtimes.values():
-            statuses.append(
-                {
-                    "id": runtime.camera.id,
-                    "name": runtime.camera.name,
-                    "enabled": runtime.camera.enabled,
-                    "status": "running" if runtime.running else "stopped",
-                    "fps": float(np.mean(runtime.fps_history)) if runtime.fps_history else 0.0,
-                    "last_event": runtime.last_event_ts,
-                }
+        with self._lock:
+            runtimes = {runtime.camera.id: runtime for runtime in self._runtimes.values()}
+
+        statuses: Dict[int, Dict[str, Optional[float]]] = {}
+        for runtime in runtimes.values():
+            if runtime.running:
+                state = "active"
+            elif runtime.last_error:
+                state = "error"
+            elif runtime.camera.enabled:
+                state = "offline"
+            else:
+                state = "disabled"
+
+            statuses[runtime.camera.id] = {
+                "id": runtime.camera.id,
+                "name": runtime.camera.name,
+                "enabled": runtime.camera.enabled,
+                "status": state,
+                "fps": float(np.mean(runtime.fps_history)) if runtime.fps_history else 0.0,
+                "last_event": runtime.last_event_ts,
+                "last_error": runtime.last_error,
+            }
+
+        with get_session() as session:
+            cameras = session.query(Camera).order_by(Camera.id.asc()).all()
+            event_rows = (
+                session.query(
+                    Event.camera_id,
+                    func.max(Event.end_ts).label("end_ts"),
+                    func.max(Event.start_ts).label("start_ts"),
+                )
+                .group_by(Event.camera_id)
+                .all()
             )
-        return statuses
+
+        last_event_map: Dict[int, Optional[datetime]] = {}
+        for camera_id, end_ts, start_ts in event_rows:
+            last_event_map[camera_id] = end_ts or start_ts
+
+        for camera in cameras:
+            existing = statuses.get(camera.id)
+            if existing:
+                existing["enabled"] = camera.enabled
+                existing["last_event"] = existing["last_event"] or last_event_map.get(camera.id)
+                if existing["status"] == "offline" and not camera.enabled:
+                    existing["status"] = "disabled"
+                continue
+
+            state = "disabled" if not camera.enabled else "offline"
+            statuses[camera.id] = {
+                "id": camera.id,
+                "name": camera.name,
+                "enabled": camera.enabled,
+                "status": state,
+                "fps": 0.0,
+                "last_event": last_event_map.get(camera.id),
+                "last_error": None,
+            }
+
+        return list(statuses.values())
 
 
 camera_manager = CameraManager()
