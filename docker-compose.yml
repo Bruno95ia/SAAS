@@ -1,0 +1,68 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:15
+    container_name: saas-db
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - /mnt/data/pgdata:/var/lib/postgresql/data
+    networks:
+      - saas-net
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: saas-api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_HOST: db
+      DATA_DIR: /data
+    depends_on:
+      - db
+    volumes:
+      - /mnt/data/saas_data:/data
+    ports:
+      - "8000:8000"
+    networks:
+      - saas-net
+
+  painel:
+    build:
+      context: .
+      dockerfile: Dockerfile.painel
+    container_name: saas-painel
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      API_URL: http://saas-api:8000
+      STREAM_URL_TEMPLATE: http://saas-api:8000/stream/{camera_id}
+    depends_on:
+      - api
+    volumes:
+      - /mnt/data/saas_data:/data
+    ports:
+      - "8501:8501"
+    networks:
+      - saas-net
+
+  saas-data:
+    image: python:3.11-slim
+    container_name: saas-data
+    profiles: ["data"]
+    volumes:
+      - /mnt/data/saas_data:/data
+    command: ["sleep", "infinity"]
+    networks:
+      - saas-net
+
+networks:
+  saas-net:
+    driver: bridge

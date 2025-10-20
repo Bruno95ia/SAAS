@@ -1,0 +1,26 @@
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DATA_DIR=/data
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libglib2.0-0 \
+    libsm6 \
+    libgl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements/panel.txt /tmp/requirements.txt
+RUN pip install --upgrade pip && pip install -r /tmp/requirements.txt
+
+COPY src/panel /app/src/panel
+COPY src/saas_core /app/src/saas_core
+
+ENV PYTHONPATH=/app/src
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "panel/app.py", "--server.address=0.0.0.0", "--server.port=8501"]
