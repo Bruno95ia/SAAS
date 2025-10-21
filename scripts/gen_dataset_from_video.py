@@ -1,5 +1,5 @@
-mkdir -p scripts # pyright: ignore[reportUndefinedVariable]
-cat > scripts/gen_dataset_from_video.py <<'PY'
+#!/usr/bin/env python3
+from __future__ import annotations
 import argparse
 import csv
 import math
@@ -39,7 +39,7 @@ def extract_frames_from_video(video_path: Path, out_dir: Path, fps_target: float
                     h, w = frame.shape[:2]
                     scale = imgsz / max(h, w)
                     if scale < 1.0:
-                        frame = cv2.resize(frame, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_AREA)
+                        frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
                 fname = f"{basename}_frame_{idx:06d}.jpg"
                 cv2.imwrite(str(out_dir / fname), frame)
                 saved += 1
@@ -48,6 +48,7 @@ def extract_frames_from_video(video_path: Path, out_dir: Path, fps_target: float
     cap.release()
     return saved
 
+
 def split_dataset(image_files, splits=(0.7, 0.2, 0.1), seed=42):
     assert math.isclose(sum(splits), 1.0, abs_tol=1e-6), "Splits devem somar 1.0"
     random.Random(seed).shuffle(image_files)
@@ -55,14 +56,16 @@ def split_dataset(image_files, splits=(0.7, 0.2, 0.1), seed=42):
     n_train = int(n * splits[0])
     n_val = int(n * splits[1])
     train = image_files[:n_train]
-    val = image_files[n_train:n_train+n_val]
-    test = image_files[n_train+n_val:]
+    val = image_files[n_train:n_train + n_val]
+    test = image_files[n_train + n_val:]
     return train, val, test
+
 
 def ensure_yolo_tree(root: Path):
     for split in ["train", "val", "test"]:
         (root / split / "images").mkdir(parents=True, exist_ok=True)
         (root / split / "labels").mkdir(parents=True, exist_ok=True)
+
 
 def move_with_label_stub(files, split_dir: Path):
     images_dir = split_dir / "images"
@@ -72,6 +75,7 @@ def move_with_label_stub(files, split_dir: Path):
         shutil.move(str(f), str(dst))
         # cria .txt vazio correspondente (para ser anotado depois)
         (labels_dir / (dst.stem + ".txt")).touch()
+
 
 def write_data_yaml(root: Path, class_names):
     data = {
@@ -84,6 +88,7 @@ def write_data_yaml(root: Path, class_names):
     }
     with open(root / "data.yaml", "w", encoding="utf-8") as f:
         yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
+
 
 def main():
     ap = argparse.ArgumentParser(description="Gera dataset YOLO a partir de vídeos.")
@@ -129,16 +134,16 @@ def main():
                 except Exception:
                     idx = -1
                 approx_sec = round((idx / args.fps), 2) if idx >= 0 else -1
-                writer.writerow([str(img), vp.name, idx, approx_sec])               
+                writer.writerow([str(img), vp.name, idx, approx_sec])
 
-     all_imgs = sorted(frames_tmp.glob("*.jpg"), key=natural_key)
+    all_imgs = sorted(frames_tmp.glob("*.jpg"), key=natural_key)
     train, val, test = split_dataset(all_imgs, splits=tuple(args.splits), seed=args.seed)
     ensure_yolo_tree(args.out_dir)
     move_with_label_stub(train, args.out_dir / "train")
     move_with_label_stub(val, args.out_dir / "val")
     move_with_label_stub(test, args.out_dir / "test")
     # remover tmp
-    shutil.rmtree(frames_tmp, ignore_errors=True)            
+    shutil.rmtree(frames_tmp, ignore_errors=True)
     write_data_yaml(args.out_dir, class_names=args.classes)
 
     print("\n✅ Dataset pronto em:", args.out_dir.resolve())
@@ -146,6 +151,7 @@ def main():
     print("   - train/val/test com images/ e labels/ (labels vazios para você anotar)")
     print("   - index.csv (mapa image→vídeo→timestamp)\n")
     print("👉 Próximos passos: anotar as caixas e classes (YOLO) nas pastas train/labels, val/labels, test/labels.")
+
 
 if __name__ == "__main__":
     main()
