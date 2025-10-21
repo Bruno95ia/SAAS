@@ -1,0 +1,17 @@
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DATA_DIR=/data
+
+WORKDIR /app
+
+COPY requirements/data.txt /tmp/requirements.txt
+RUN pip install --upgrade pip && pip install -r /tmp/requirements.txt
+
+COPY src /app/src
+
+ENV PYTHONPATH=/app/src
+
+CMD ["python", "-m", "data_sync_service"]
