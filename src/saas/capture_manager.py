@@ -72,7 +72,7 @@ class CaptureManager:
     def _probe_source(self) -> None:
         """Obtém informações da stream usando ffprobe (quando disponível)."""
 
-        if self.source_type != "rtsp":
+        if self.source_type not in {"rtsp", "custom"}:
             # Para captura local/screen os parâmetros são definidos manualmente.
             self.logger.info(
                 "Captura local/avfoundation detectada. Ajuste devices conforme necessário."
@@ -154,7 +154,7 @@ class CaptureManager:
                 "-c",
                 "copy",
             ]
-        else:
+        elif self.source_type in {"screen", "local"}:
             # Captura via AVFoundation (macOS). Ajuste dos dispositivos padrão:
             device = "1:none" if self.source_type == "screen" else "0:none"
             base_cmd += [
@@ -174,6 +174,18 @@ class CaptureManager:
                 "veryfast",
                 "-crf",
                 "23",
+            ]
+        else:
+            # Origens customizadas: delegamos a interpretação diretamente ao FFmpeg.
+            base_cmd += [
+                "-i",
+                self.source,
+                "-fflags",
+                "+genpts",
+                "-reset_timestamps",
+                "1",
+                "-c",
+                "copy",
             ]
 
         base_cmd += [

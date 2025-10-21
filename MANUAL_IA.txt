@@ -30,6 +30,8 @@ MANUAL DE OPERACAO - PIPELINE IA SAAS
 -----------------
 ```bash
 python -m saas.live_yolo --camera CAM01 --rtsp rtsp://127.0.0.1:8554/cam01
+# ou para processar os segmentos gravados da tela local:
+python -m saas.live_yolo --camera CAM01 --rtsp screen
 ```
 
 4. Estrutura de Pastas

@@ -67,13 +67,20 @@ class FrameSource:
 
     SUPPORTED_EXTENSIONS = {".mp4", ".m4s", ".mkv", ".avi", ".mov"}
 
-    def __init__(self, source: str, buffer_dir: Path, reconnect_interval: float = 5.0):
+    def __init__(
+        self,
+        source: str,
+        buffer_dir: Path,
+        reconnect_interval: float = 5.0,
+        buffer_interval: float = 1.0,
+    ):
         self.source = source
         self.source_type = config.detect_source_type(source)
         self.buffer_dir = buffer_dir
         self.buffer_dir.mkdir(parents=True, exist_ok=True)
         self._processed_files: set[Path] = set()
         self.reconnect_interval = reconnect_interval
+        self.buffer_interval = max(0.5, buffer_interval)
         self.logger = get_logger("saas.live.frames")
 
         self.logger.info(
@@ -162,6 +169,35 @@ class FrameSource:
             self.logger.info("Conexão encerrada. Tentando reconectar...")
             time.sleep(backoff)
 
+    # ------------------------------- combinado
+    def iter_frames(self) -> Iterator[Tuple[np.ndarray, str, float]]:
+        """Intercala frames ao vivo com os segmentos gravados."""
+
+        live_iter: Optional[Iterator[Tuple[np.ndarray, str, float]]] = None
+        if self.source_type in {"rtsp", "custom"}:
+            live_iter = self.iter_live_stream()
+
+        next_buffer_poll = 0.0
+        while True:
+            now = time.time()
+            if now >= next_buffer_poll:
+                for frame_info in self.iter_buffer_frames():
+                    yield frame_info
+                next_buffer_poll = now + self.buffer_interval
+
+            if live_iter is None:
+                time.sleep(self.buffer_interval)
+                continue
+
+            try:
+                yield next(live_iter)
+            except StopIteration:
+                live_iter = self.iter_live_stream()
+            except Exception as exc:  # pragma: no cover - segurança extra
+                self.logger.exception("Erro lendo frame ao vivo: %s", exc)
+                time.sleep(self.reconnect_interval)
+                live_iter = self.iter_live_stream()
+
 
 # ---------------------------------------------------------------------------
 # Runner principal
@@ -176,7 +212,14 @@ class LiveYoloRunner:
         buffer_path = Path(args.buffer) if args.buffer else config.default_buffer_dir(args.camera)
         self.buffer_dir = buffer_path
         self.buffer_dir.mkdir(parents=True, exist_ok=True)
-        self.frame_source = FrameSource(args.rtsp, self.buffer_dir)
+        self.reconnect_seconds = max(0.5, args.reconnect)
+        self.buffer_interval = max(0.5, args.buffer_interval)
+        self.frame_source = FrameSource(
+            args.rtsp,
+            self.buffer_dir,
+            reconnect_interval=self.reconnect_seconds,
+            buffer_interval=self.buffer_interval,
+        )
 
         self.api_settings = config.load_api_settings()
         self.api_url = (args.api_url or self.api_settings.url).rstrip("/")
@@ -204,10 +247,12 @@ class LiveYoloRunner:
             )
 
         LOGGER.info(
-            "Pipeline Live YOLO inicializado camera=%s origem=%s buffer=%s",
+            "Pipeline Live YOLO inicializado camera=%s origem=%s buffer=%s reconnect=%.1fs buffer_poll=%.1fs",
             args.camera,
             args.rtsp,
             self.buffer_dir,
+            self.reconnect_seconds,
+            self.buffer_interval,
         )
 
     # ------------------------------- modelo
@@ -394,12 +439,8 @@ class LiveYoloRunner:
     # ------------------------------- loop principal
     def run(self) -> None:
         try:
-            while True:
-                for frame, source, _ts in self.frame_source.iter_buffer_frames():
-                    self._process_frame(frame, source)
-
-                for frame, source, _ts in self.frame_source.iter_live_stream():
-                    self._process_frame(frame, source)
+            for frame, source, _ts in self.frame_source.iter_frames():
+                self._process_frame(frame, source)
         except KeyboardInterrupt:
             LOGGER.info("Execução interrompida pelo usuário")
 
@@ -432,6 +473,13 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--pre", type=float, default=5.0, help="Segundos antes do evento no clipe")
     parser.add_argument("--post", type=float, default=5.0, help="Segundos após o evento no clipe")
     parser.add_argument("--debounce", type=float, default=10.0, help="Tempo mínimo entre alertas (s)")
+    parser.add_argument("--reconnect", type=float, default=5.0, help="Intervalo para tentar reconectar a stream")
+    parser.add_argument(
+        "--buffer-interval",
+        type=float,
+        default=1.0,
+        help="Intervalo em segundos para varrer novos segmentos do buffer",
+    )
     api_defaults = config.load_api_settings()
     parser.add_argument("--api-url", default=api_defaults.url)
     parser.add_argument("--api-key", default=api_defaults.key)
