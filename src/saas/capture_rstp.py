@@ -1,26 +1,35 @@
-"""Ferramenta para gravar segmentos RTSP contínuos em disco.
+"""CLI de captura contínua utilizando :class:`CaptureManager`.
 
-Os arquivos gerados são usados posteriormente para montar clipes quando um
-evento é detectado. Mantemos os segmentos curtos (ex.: 2s) para facilitar a
-montagem de janelas com `pre`/`post` segundos.
+Este script mantém a compatibilidade com a versão anterior, porém agora delega
+à classe `CaptureManager` a responsabilidade de montar o comando FFmpeg,
+registrar logs e reconectar automaticamente em caso de queda da stream.
 """
 
 from __future__ import annotations
 
 import argparse
-import subprocess
 from pathlib import Path
+
+from saas import config
+from saas.capture_manager import CaptureManager
+from saas.utils.logger import get_logger
 
 
 def build_argparser() -> argparse.ArgumentParser:
+    """Constroi o parser de argumentos da CLI."""
+
     parser = argparse.ArgumentParser(
-        description="Captura RTSP e grava segmentos contínuos em disco",
+        description="Captura RTSP ou tela local e grava segmentos contínuos em disco",
     )
     parser.add_argument("--camera", required=True, help="Identificador lógico da câmera")
-    parser.add_argument("--rtsp", required=True, help="URL RTSP ou 'webcam'")
+    parser.add_argument(
+        "--rtsp",
+        required=True,
+        help="Origem do vídeo: URL rtsp://, 'screen' ou 'local'",
+    )
     parser.add_argument(
         "--out",
-        default="runs/buffer",
+        default=str(config.BUFFER_DIR),
         help="Diretório base onde os segmentos serão armazenados",
     )
     parser.add_argument(
@@ -29,50 +38,41 @@ def build_argparser() -> argparse.ArgumentParser:
         default=2,
         help="Duração de cada segmento em segundos",
     )
+    parser.add_argument(
+        "--reconnect",
+        type=float,
+        default=5.0,
+        help="Intervalo (s) antes de tentar reconectar após uma falha",
+    )
     return parser
 
 
 def main() -> None:
     args = build_argparser().parse_args()
 
-    outdir = Path(args.out) / args.camera
-    outdir.mkdir(parents=True, exist_ok=True)
+    logger = get_logger("saas.capture")
+    config.ensure_runtime_directories()
 
-    # Gravamos com formatação por data (YYYYMMDD/HHMMSS.m4s) para facilitar a
-    # reconstrução de clipes posteriormente.
-    segment_template = outdir / "%Y%m%d" / "%H%M%S.m4s"
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "warning",
-        "-rtsp_transport",
-        "tcp",
-        "-timeout",
-        "5000000",
-        "-i",
-        "0" if args.rtsp.lower() == "webcam" else args.rtsp,
-        "-reset_timestamps",
-        "1",
-        "-c",
-        "copy",
-        "-f",
-        "segment",
-        "-segment_time",
-        str(args.segment),
-        "-strftime",
-        "1",
-        str(segment_template),
-    ]
+    output_base = Path(args.out)
+    output_base.mkdir(parents=True, exist_ok=True)
 
-    print("Comando FFmpeg:", " ".join(cmd))
-    try:
-        subprocess.run(cmd, check=True)
-    except FileNotFoundError as exc:
-        raise RuntimeError(
-            "ffmpeg não encontrado. Instale o utilitário para capturar a stream RTSP."
-        ) from exc
+    manager = CaptureManager.from_args(
+        camera_id=args.camera,
+        source=args.rtsp,
+        output_base=output_base,
+        segment_seconds=args.segment,
+        reconnect_seconds=args.reconnect,
+    )
+
+    logger.info(
+        "Iniciando captura unificada camera=%s origem=%s destino=%s",
+        args.camera,
+        args.rtsp,
+        manager.segment_template.parent,
+    )
+
+    manager.run()
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - execução direta
     main()
