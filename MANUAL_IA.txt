@@ -1,0 +1,57 @@
+MANUAL DE OPERACAO - PIPELINE IA SAAS
+====================================
+
+1. Instalacao
+-------------
+- **Requisitos de sistema**: Ubuntu 24.04 ou macOS (para captura local), Python 3.12+, FFmpeg 6.1.1+, drivers de GPU opcionais.
+- **Criacao do ambiente virtual**:
+  ```bash
+  python3 -m venv .venv
+  source .venv/bin/activate
+  pip install --upgrade pip
+  ```
+- **Instalacao das dependencias**:
+  ```bash
+  pip install -r requirements.txt
+  ```
+
+2. Execucao da Captura
+----------------------
+- **Captura local (macOS / tela)**:
+  ```bash
+  python -m saas.capture_rstp --camera CAM01 --rtsp screen
+  ```
+- **Captura remota (RTSP / MediaMTX)**:
+  ```bash
+  python -m saas.capture_rstp --camera CAM01 --rtsp rtsp://127.0.0.1:8554/cam01
+  ```
+
+3. Execucao da IA
+-----------------
+```bash
+python -m saas.live_yolo --camera CAM01 --rtsp rtsp://127.0.0.1:8554/cam01
+```
+
+4. Estrutura de Pastas
+----------------------
+```
+src/
+  saas/
+    capture_manager.py
+    capture_rstp.py
+    live_yolo.py
+    config.py
+    utils/logger.py
+runs/
+  buffer/
+  logs/
+  results/
+weights/
+```
+
+5. Boas Praticas e Troubleshooting
+----------------------------------
+- Consulte `runs/logs/saas.log` para mensagens detalhadas de erro/reconexao.
+- Se FFmpeg relatar erros, valide o comando manualmente; ajuste devices avfoundation em macOS conforme `ffmpeg -f avfoundation -list_devices true -i ""`.
+- Certifique-se de que a stream RTSP esta ativa usando `ffplay rtsp://...`.
+- Para estabilidade em redes remotas, considere tunelar o trafego via Tailscale ou VPN semelhante.

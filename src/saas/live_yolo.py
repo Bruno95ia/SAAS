@@ -1,19 +1,16 @@
-"""Pipeline de detecção em tempo real com reconexão e fallback offline.
+"""Pipeline de inferência em tempo real com YOLOv8.
 
-Compatível com Python 3.12 e Ubuntu 24.04.
+Este módulo foi refatorado para privilegiar organização e clareza. O fluxo
+agora utiliza o `CaptureManager` para gerar segmentos em `runs/buffer/<camera>`
+e processa automaticamente tanto frames ao vivo quanto arquivos gravados.
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import datetime as dt
-import io
-import logging
 import math
-import os
 import time
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Iterator, Optional, Tuple
 
@@ -22,37 +19,19 @@ import numpy as np
 import requests
 from ultralytics import YOLO
 
+from saas import config
 from saas.annotate import annotate_clip
 from saas.clipper import collect_clip
 from saas.infer_tcn import TCNInfer
 from saas.pose_features_yolo import features_from_kpts
 from saas.pose_yolo import _best_person
+from saas.utils.logger import get_logger
+
+LOGGER = get_logger("saas.live")
 
 
-LOGGER = logging.getLogger("saas.live")
-
-
-def _setup_logging() -> None:
-    log_dir = Path("runs/logs")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "saas.log"
-
-    handler = RotatingFileHandler(log_path, maxBytes=5_000_000, backupCount=3)
-    formatter = logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S%z",
-    )
-    handler.setFormatter(formatter)
-
-    root = logging.getLogger("saas")
-    if not root.handlers:
-        root.addHandler(handler)
-        root.setLevel(logging.INFO)
-
-    if not LOGGER.handlers:
-        LOGGER.addHandler(handler)
-        LOGGER.setLevel(logging.INFO)
-        LOGGER.propagate = False
+# ---------------------------------------------------------------------------
+# Helpers geométricos
 
 
 def trunk_angle(keypoints: np.ndarray) -> float:
@@ -79,91 +58,40 @@ def vy_norm(prev_hip_y: Optional[float], hip_y: float, bbox_h: float) -> float:
     return (hip_y - prev_hip_y) / bbox_h
 
 
-def _open_detection_log(path: str) -> Optional[Tuple[csv.writer, io.TextIOWrapper]]:
-    if not path:
-        return None
-
-    log_path = Path(path)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    file = log_path.open("a", newline="", encoding="utf-8")
-    writer = csv.writer(file)
-    if log_path.stat().st_size == 0:
-        writer.writerow(
-            [
-                "ts_iso",
-                "camera_id",
-                "score",
-                "trunk_angle_deg",
-                "vy_norm",
-                "flat_ratio",
-                "probable",
-                "confirmed",
-                "tcn_prob",
-                "source",
-            ]
-        )
-
-    return writer, file
-
-
-def _close_detection_log(handle: Optional[Tuple[csv.writer, io.TextIOWrapper]]) -> None:
-    if handle is None:
-        return
-    _, file = handle
-    file.close()
-
-
-def _tcn_probability(logits: np.ndarray) -> float:
-    if logits.ndim == 0 or logits.size == 0:
-        return 0.0
-    if logits.size == 1:
-        return float(logits.item())
-    logits = logits.astype(np.float32)
-    logits -= logits.max()
-    exps = np.exp(logits)
-    probs = exps / exps.sum()
-    return float(probs[-1])
-
-
-def _resolve_weights_path(candidate: str) -> str:
-    """Resolve o caminho do peso do YOLO com fallback para `weights/yolov8n.pt`."""
-
-    cand_path = Path(candidate)
-    if cand_path.is_file():
-        return str(cand_path)
-
-    fallback = Path("weights") / "yolov8n.pt"
-    if fallback.is_file():
-        LOGGER.warning(
-            "Peso %s não encontrado. Usando fallback local %s", candidate, fallback
-        )
-        return str(fallback)
-
-    LOGGER.warning(
-        "Peso %s não encontrado e fallback padrão ausente. YOLO tentará baixar o modelo.",
-        candidate,
-    )
-    return candidate
+# ---------------------------------------------------------------------------
+# Fontes de frame
 
 
 class FrameSource:
-    """Gerencia a leitura da stream RTSP e dos segmentos gravados."""
+    """Combina leitura direta da stream e dos segmentos gravados."""
 
     SUPPORTED_EXTENSIONS = {".mp4", ".m4s", ".mkv", ".avi", ".mov"}
 
-    def __init__(self, rtsp: str, buffer_dir: Path, reconnect_interval: float = 5.0):
-        self._rtsp = rtsp
-        self._buffer_dir = buffer_dir
-        self._buffer_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, source: str, buffer_dir: Path, reconnect_interval: float = 5.0):
+        self.source = source
+        self.source_type = config.detect_source_type(source)
+        self.buffer_dir = buffer_dir
+        self.buffer_dir.mkdir(parents=True, exist_ok=True)
         self._processed_files: set[Path] = set()
-        self._reconnect_interval = reconnect_interval
+        self.reconnect_interval = reconnect_interval
+        self.logger = get_logger("saas.live.frames")
 
-    def iter_buffer_frames(self) -> Iterator[Tuple[np.ndarray, str]]:
-        """Percorre novos segmentos gravados no disco."""
+        self.logger.info(
+            "FrameSource configurado tipo=%s buffer=%s", self.source_type, self.buffer_dir
+        )
+        if self.source_type in {"screen", "local"}:
+            self.logger.info(
+                "Origem '%s' depende dos segmentos gravados pelo CaptureManager.",
+                self.source_type,
+            )
+
+    # ------------------------------- buffer
+    def iter_buffer_frames(self) -> Iterator[Tuple[np.ndarray, str, float]]:
+        """Percorre novos segmentos armazenados no disco."""
 
         files = sorted(
             f
-            for f in self._buffer_dir.rglob("*")
+            for f in self.buffer_dir.rglob("*")
             if f.is_file() and f.suffix.lower() in self.SUPPORTED_EXTENSIONS
         )
 
@@ -171,10 +99,10 @@ class FrameSource:
             if file_path in self._processed_files:
                 continue
 
-            LOGGER.info("Processando segmento gravado: %s", file_path)
+            self.logger.info("Processando segmento gravado: %s", file_path)
             cap = cv2.VideoCapture(str(file_path))
             if not cap.isOpened():
-                LOGGER.warning("Não foi possível abrir o arquivo %s", file_path)
+                self.logger.warning("Não foi possível abrir o arquivo %s", file_path)
                 self._processed_files.add(file_path)
                 continue
 
@@ -182,135 +110,131 @@ class FrameSource:
                 ok, frame = cap.read()
                 if not ok:
                     break
-                yield frame, "buffer"
+                yield frame, "buffer", time.time()
 
             cap.release()
             self._processed_files.add(file_path)
 
-    def iter_live_stream(self) -> Iterator[Tuple[np.ndarray, str]]:
-        """Tenta manter a conexão com a stream RTSP continuamente."""
+    # ------------------------------- live
+    def iter_live_stream(self) -> Iterator[Tuple[np.ndarray, str, float]]:
+        """Mantém conexão com a origem de vídeo, realizando reconexões."""
 
-        backoff = self._reconnect_interval
-        src = 0 if self._rtsp.lower() == "webcam" else self._rtsp
+        if self.source_type not in {"rtsp", "custom"}:
+            return
 
+        source = self.source
+        if self.source_type == "custom" and source.isdigit():
+            source = int(source)
+
+        backoff = self.reconnect_interval
         while True:
-            cap = cv2.VideoCapture(src)
+            cap = cv2.VideoCapture(source)
             if not cap.isOpened():
-                LOGGER.warning(
-                    "Falha ao abrir stream %s. Tentando novamente em %.1fs",
-                    self._rtsp,
-                    backoff,
+                self.logger.warning(
+                    "Falha ao abrir stream %s. Nova tentativa em %.1fs", self.source, backoff
                 )
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
                 yield from self.iter_buffer_frames()
                 continue
 
-            LOGGER.info("Stream %s conectada com sucesso", self._rtsp)
-            backoff = self._reconnect_interval
-
+            self.logger.info("Stream %s conectada com sucesso", self.source)
+            backoff = self.reconnect_interval
             failure_count = 0
+
             while True:
                 ok, frame = cap.read()
+                ts = time.time()
                 if not ok:
                     failure_count += 1
                     if failure_count >= 5:
-                        LOGGER.warning(
-                            "Falha de leitura na stream %s. Reiniciando conexão.",
-                            self._rtsp,
+                        self.logger.warning(
+                            "Falha de leitura na stream %s. Reiniciando conexão.", self.source
                         )
                         break
                     time.sleep(0.1)
                     continue
 
                 failure_count = 0
-                yield frame, "live"
+                yield frame, "live", ts
 
             cap.release()
-            LOGGER.info("Conexão com %s encerrada. Reabrindo...", self._rtsp)
+            self.logger.info("Conexão encerrada. Tentando reconectar...")
+            time.sleep(backoff)
+
+
+# ---------------------------------------------------------------------------
+# Runner principal
 
 
 class LiveYoloRunner:
-    def __init__(self, args: argparse.Namespace):
-        _setup_logging()
+    """Executa inferência em tempo real combinando stream e buffer."""
+
+    def __init__(self, args: argparse.Namespace) -> None:
+        config.ensure_runtime_directories()
         self.args = args
-        self.api_url = args.api_url.rstrip("/")
-        self.api_key = args.api_key
-        self.cam_id = args.camera
-        self.buffer_dir = Path(args.buffer)
+        buffer_path = Path(args.buffer) if args.buffer else config.default_buffer_dir(args.camera)
+        self.buffer_dir = buffer_path
+        self.buffer_dir.mkdir(parents=True, exist_ok=True)
+        self.frame_source = FrameSource(args.rtsp, self.buffer_dir)
+
+        self.api_settings = config.load_api_settings()
+        self.api_url = (args.api_url or self.api_settings.url).rstrip("/")
+        self.api_key = args.api_key or self.api_settings.key
+
         self.theta_rot = math.radians(args.theta_deg)
         self.conf_min = args.conf
-        self.last_alert = 0.0
         self.prev_hip: Optional[float] = None
         self.flat_since: Optional[float] = None
         self.tcn: Optional[TCNInfer] = None
         self.tcn_prob = 0.0
-        self.model = self._load_model(args.weights)
-        self.frame_source = FrameSource(args.rtsp, self.buffer_dir)
-        self.log_handle = _open_detection_log(args.log_detections)
+        self.last_alert = 0.0
+        self.frame_counter = 0
+        self.last_log = time.time()
+
+        resolved_weights = config.resolve_weights_path(args.weights)
+        LOGGER.info("Carregando YOLOv8 com pesos %s", resolved_weights)
+        self.model = self._load_model(resolved_weights)
 
         if args.use_tcn:
             self.tcn = TCNInfer(args.tcn_path)
             self.tcn.warmup(T=args.tcn_window, F=5)
             LOGGER.info(
-                "TCN carregado de %s com janela %d",
-                args.tcn_path,
-                args.tcn_window,
+                "TCN carregado de %s com janela %d", args.tcn_path, args.tcn_window
             )
 
         LOGGER.info(
-            "Pipeline inicializado camera=%s src=%s theta=%.1f vy_min=%.2f flat_sec=%.1f",
-            self.cam_id,
+            "Pipeline Live YOLO inicializado camera=%s origem=%s buffer=%s",
+            args.camera,
             args.rtsp,
-            args.theta_deg,
-            args.vy_min,
-            args.flat_sec,
+            self.buffer_dir,
         )
 
-    def _load_model(self, weights: str) -> YOLO:
-        resolved = _resolve_weights_path(weights)
-        LOGGER.info("Carregando modelo YOLO de %s", resolved)
+    # ------------------------------- modelo
+    def _load_model(self, weights_path: Path) -> YOLO:
         try:
-            return YOLO(resolved)
-        except Exception as exc:  # pragma: no cover - erro externo
-            LOGGER.error("Falha ao carregar YOLO: %s", exc)
+            return YOLO(str(weights_path))
+        except Exception as exc:  # pragma: no cover - falhas externas
+            LOGGER.error("Falha ao carregar YOLO (%s). Tentando fallback...", exc)
             time.sleep(1.0)
-            return YOLO(resolved)
+            return YOLO(str(weights_path))
 
     def _reload_model(self) -> None:
-        LOGGER.warning("Recarregando o modelo YOLO devido a erro de inferência")
-        self.model = self._load_model(self.args.weights)
+        LOGGER.warning("Recarregando modelo YOLO após erro de inferência")
+        self.model = self._load_model(config.resolve_weights_path(self.args.weights))
 
-    def _log_detection(
-        self,
-        score: float,
-        angle: float,
-        vy: float,
-        flat_ratio: float,
-        probable: bool,
-        confirmed: bool,
-        source: str,
-    ) -> None:
-        if self.log_handle is None:
+    # ------------------------------- métricas auxiliares
+    def _log_metrics(self) -> None:
+        now = time.time()
+        elapsed = now - self.last_log
+        if elapsed < 10:
             return
-        writer, file = self.log_handle
-        ts_iso = dt.datetime.now(dt.timezone.utc).isoformat()
-        writer.writerow(
-            [
-                ts_iso,
-                self.cam_id,
-                float(score),
-                math.degrees(angle),
-                float(vy),
-                flat_ratio,
-                int(probable),
-                int(confirmed),
-                float(self.tcn_prob),
-                source,
-            ]
-        )
-        file.flush()
+        fps = self.frame_counter / elapsed if elapsed else 0.0
+        LOGGER.info("Taxa média de processamento: %.2f FPS", fps)
+        self.frame_counter = 0
+        self.last_log = now
 
+    # ------------------------------- TCN opcional
     def _push_tcn(self, keypoints: np.ndarray, box: np.ndarray) -> None:
         if self.tcn is None:
             self.tcn_prob = 0.0
@@ -321,8 +245,17 @@ class LiveYoloRunner:
             np.array([box], dtype=np.float32),
         )
         feat_vec = feats[0] if mask[0] > 0.5 else np.zeros(5, dtype=np.float32)
-        self.tcn_prob = _tcn_probability(self.tcn.push_and_score(feat_vec))
+        logits = self.tcn.push_and_score(feat_vec)
+        if logits.ndim == 0 or logits.size == 0:
+            self.tcn_prob = 0.0
+        else:
+            logits = logits.astype(np.float32)
+            logits -= logits.max()
+            exps = np.exp(logits)
+            probs = exps / exps.sum()
+            self.tcn_prob = float(probs[-1])
 
+    # ------------------------------- alertas
     def _post_alert(
         self,
         score: float,
@@ -338,18 +271,22 @@ class LiveYoloRunner:
             event_time = dt.datetime.now(dt.timezone.utc)
             local_path, _ = collect_clip(
                 buffer_dir=str(self.buffer_dir),
-                camera_id=self.cam_id,
+                camera_id=self.args.camera,
                 when=event_time,
                 pre=self.args.pre,
                 post=self.args.post,
             )
 
-            ev_bbox = [x1 / width, y1 / height, (x2 - x1) / width, (y2 - y1) / height]
             events = [
                 {
                     "t0": 0.0,
                     "t1": self.args.pre + self.args.post,
-                    "bbox": ev_bbox,
+                    "bbox": [
+                        x1 / width,
+                        y1 / height,
+                        (x2 - x1) / width,
+                        (y2 - y1) / height,
+                    ],
                     "label": "fall",
                     "score": float(score),
                 }
@@ -358,7 +295,7 @@ class LiveYoloRunner:
             clip_url = f"{self.api_url}/clips/{Path(annotated).name}"
 
             payload = {
-                "camera_id": self.cam_id,
+                "camera_id": self.args.camera,
                 "type": "fall",
                 "score": float(score),
                 "clip_path": clip_url,
@@ -377,10 +314,14 @@ class LiveYoloRunner:
             )
             response.raise_for_status()
             LOGGER.info("Alerta publicado com sucesso: %s", clip_url)
-        except Exception as exc:  # pragma: no cover - erros de IO externos
+        except Exception as exc:  # pragma: no cover - erros externos
             LOGGER.exception("Erro ao gerar/publicar clipe: %s", exc)
 
+    # ------------------------------- processamento
     def _process_frame(self, frame: np.ndarray, source: str) -> None:
+        self.frame_counter += 1
+        self._log_metrics()
+
         height, width = frame.shape[:2]
 
         try:
@@ -390,7 +331,7 @@ class LiveYoloRunner:
                 conf=self.conf_min,
                 verbose=False,
             )[0]
-        except Exception:  # pragma: no cover - erro no modelo
+        except Exception:  # pragma: no cover - falhas no modelo
             LOGGER.exception("Erro na inferência do modelo")
             self._reload_model()
             return
@@ -402,9 +343,7 @@ class LiveYoloRunner:
             self.prev_hip = None
             self.flat_since = None
             if self.tcn is not None:
-                self.tcn_prob = _tcn_probability(
-                    self.tcn.push_and_score(np.zeros(5, dtype=np.float32))
-                )
+                self._push_tcn(np.zeros((17, 3), dtype=np.float32), np.zeros(4))
             return
 
         keypoints, box, score = best
@@ -433,30 +372,40 @@ class LiveYoloRunner:
         confirmed = self.flat_since is not None and (now - self.flat_since) >= self.args.flat_sec
 
         self._push_tcn(keypoints, box)
-        self._log_detection(score, angle, vy, flat_ratio, probable, confirmed, source)
+
+        LOGGER.info(
+            "Detecção camera=%s fonte=%s score=%.2f angle=%.1f vy=%.2f flat_ratio=%.2f tcn=%.2f",
+            self.args.camera,
+            source,
+            score,
+            math.degrees(angle),
+            vy,
+            flat_ratio,
+            self.tcn_prob,
+        )
 
         if confirmed and (now - self.last_alert) > self.args.debounce:
             self.last_alert = now
             LOGGER.info(
-                "Evento confirmado camera=%s score=%.2f angle=%.1f vy=%.2f fonte=%s",
-                self.cam_id,
-                score,
-                math.degrees(angle),
-                vy,
-                source,
+                "Evento confirmado camera=%s origem=%s score=%.2f", self.args.camera, source, score
             )
             self._post_alert(score, angle, vy, (x1, y1, x2, y2), (height, width))
 
+    # ------------------------------- loop principal
     def run(self) -> None:
         try:
             while True:
-                for frame, source in self.frame_source.iter_buffer_frames():
+                for frame, source, _ts in self.frame_source.iter_buffer_frames():
                     self._process_frame(frame, source)
 
-                for frame, source in self.frame_source.iter_live_stream():
+                for frame, source, _ts in self.frame_source.iter_live_stream():
                     self._process_frame(frame, source)
-        finally:
-            _close_detection_log(self.log_handle)
+        except KeyboardInterrupt:
+            LOGGER.info("Execução interrompida pelo usuário")
+
+
+# ---------------------------------------------------------------------------
+# CLI
 
 
 def run(args: argparse.Namespace) -> None:
@@ -465,18 +414,17 @@ def run(args: argparse.Namespace) -> None:
 
 
 def build_argparser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="YOLOv8-pose live fall-detection (robusto)")
+    parser = argparse.ArgumentParser(description="YOLOv8 live fall-detection padronizado")
     parser.add_argument("--camera", default="cam01", help="ID lógico da câmera")
-    parser.add_argument("--rtsp", required=True, help='"webcam" ou URL RTSP')
-    parser.add_argument("--buffer", required=True, help="Pasta do ring buffer: runs/buffer/<camera>")
-    parser.add_argument("--weights", default="yolov8n-pose.pt")
+    parser.add_argument("--rtsp", required=True, help="Origem: rtsp://, 'screen', 'local' ou dispositivo")
+    parser.add_argument(
+        "--buffer",
+        default=None,
+        help="Pasta do ring buffer (runs/buffer/<camera>)",
+    )
+    parser.add_argument("--weights", default=str(config.DEFAULT_WEIGHTS))
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--conf", type=float, default=0.25)
-    parser.add_argument(
-        "--log-detections",
-        default="runs/logs/detections.csv",
-        help="CSV onde salvar timestamp, camera_id, score e features",
-    )
     parser.add_argument("--theta-deg", type=float, default=55.0, help="Limiar de rotação do tronco (graus)")
     parser.add_argument("--vy-min", type=float, default=0.25, help="Velocidade vertical normalizada mínima")
     parser.add_argument("--flat-ratio", type=float, default=0.60, help="H/W < flat_ratio => deitado")
@@ -484,14 +432,14 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--pre", type=float, default=5.0, help="Segundos antes do evento no clipe")
     parser.add_argument("--post", type=float, default=5.0, help="Segundos após o evento no clipe")
     parser.add_argument("--debounce", type=float, default=10.0, help="Tempo mínimo entre alertas (s)")
-    parser.add_argument("--api-url", default=os.getenv("SAAS_API_URL", "http://127.0.0.1:8000"))
-    parser.add_argument("--api-key", default=os.getenv("SAAS_API_KEY", "minha-chave-forte"))
-    parser.add_argument("--use-tcn", action="store_true", help="Usa o TCN treinado (ONNX) em tempo real")
+    api_defaults = config.load_api_settings()
+    parser.add_argument("--api-url", default=api_defaults.url)
+    parser.add_argument("--api-key", default=api_defaults.key)
+    parser.add_argument("--use-tcn", action="store_true", help="Ativa o TCN treinado (ONNX)")
     parser.add_argument("--tcn-path", default="runs/models/tcn.onnx")
     parser.add_argument("--tcn-window", type=int, default=32, help="Tamanho da janela temporal")
     return parser
 
 
-if __name__ == "__main__":  # pragma: no cover - execução como script
+if __name__ == "__main__":  # pragma: no cover - execução direta
     run(build_argparser().parse_args())
-
