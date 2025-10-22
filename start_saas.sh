@@ -70,3 +70,11 @@ echo "✅ Stack SAAS totalmente inicializada!"
 echo "📍 API:     http://127.0.0.1:8000"
 echo "📍 Painel:  http://127.0.0.1:8501"
 echo "📁 Logs:    $LOG_DIR"
+# --- AUTO PUSH GIT ---
+echo "[Git] Sincronizando alterações com o repositório remoto..."
+cd /mnt/data/SAAS_core/SAAS
+git add .
+git commit -m "Auto push: atualização automática do servidor em $(date '+%Y-%m-%d %H:%M:%S')" || true
+git pull origin main --allow-unrelated-histories --strategy-option ours || true
+git push origin main --force
+echo "[Git] Sincronização concluída com sucesso."
