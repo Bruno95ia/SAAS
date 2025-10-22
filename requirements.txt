@@ -1,0 +1,7 @@
+numpy<2
+protobuf<5
+opencv-python==4.9.0.80
+ultralytics==8.3.27
+pyyaml>=6
+prometheus-client>=0.20
+requests>=2.31
