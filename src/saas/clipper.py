@@ -13,8 +13,10 @@ from typing import Iterable, Optional, Sequence, Tuple
 
 import cv2
 
+from saas import config
 
-CLIPS_DIR = Path("runs/clips")
+
+CLIPS_DIR = config.CLIPS_DIR
 CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 
 

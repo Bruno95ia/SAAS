@@ -76,6 +76,7 @@ class FrameSource:
     ):
         self.source = source
         self.source_type = config.detect_source_type(source)
+        self.source_options = config.parse_source_options(source)
         self.buffer_dir = buffer_dir
         self.buffer_dir.mkdir(parents=True, exist_ok=True)
         self._processed_files: set[Path] = set()
@@ -86,10 +87,11 @@ class FrameSource:
         self.logger.info(
             "FrameSource configurado tipo=%s buffer=%s", self.source_type, self.buffer_dir
         )
-        if self.source_type in {"screen", "local"}:
+        if self.source_options:
+            self.logger.info("Parâmetros de origem: %s", self.source_options)
+        if self.source_type == "screen":
             self.logger.info(
-                "Origem '%s' depende dos segmentos gravados pelo CaptureManager.",
-                self.source_type,
+                "Origem 'screen' depende dos segmentos gravados pelo CaptureManager.",
             )
 
     # ------------------------------- buffer
@@ -126,12 +128,17 @@ class FrameSource:
     def iter_live_stream(self) -> Iterator[Tuple[np.ndarray, str, float]]:
         """Mantém conexão com a origem de vídeo, realizando reconexões."""
 
-        if self.source_type not in {"rtsp", "custom"}:
+        if self.source_type not in {"rtsp", "custom", "local"}:
             return
 
         source = self.source
-        if self.source_type == "custom" and source.isdigit():
-            source = int(source)
+        if self.source_type in {"custom", "local"}:
+            default_device = "0" if self.source_type == "local" else source
+            device = self.source_options.get("device") or default_device
+            if isinstance(device, str) and device.isdigit():
+                source = int(device)
+            else:
+                source = device
 
         backoff = self.reconnect_interval
         while True:
@@ -234,6 +241,7 @@ class LiveYoloRunner:
         self.last_alert = 0.0
         self.frame_counter = 0
         self.last_log = time.time()
+        self.window_name = f"SAAS | {args.camera}"
 
         resolved_weights = config.resolve_weights_path(args.weights)
         LOGGER.info("Carregando YOLOv8 com pesos %s", resolved_weights)
@@ -389,6 +397,8 @@ class LiveYoloRunner:
             self.flat_since = None
             if self.tcn is not None:
                 self._push_tcn(np.zeros((17, 3), dtype=np.float32), np.zeros(4))
+            if self.args.display:
+                self._show_frame(frame, source, None, None)
             return
 
         keypoints, box, score = best
@@ -429,6 +439,17 @@ class LiveYoloRunner:
             self.tcn_prob,
         )
 
+        if self.args.display:
+            overlay = {
+                "score": score,
+                "angle": math.degrees(angle),
+                "vy": vy,
+                "flat_ratio": flat_ratio,
+                "tcn": self.tcn_prob,
+                "confirmed": confirmed,
+            }
+            self._show_frame(frame, source, (x1, y1, x2, y2), overlay)
+
         if confirmed and (now - self.last_alert) > self.args.debounce:
             self.last_alert = now
             LOGGER.info(
@@ -443,6 +464,85 @@ class LiveYoloRunner:
                 self._process_frame(frame, source)
         except KeyboardInterrupt:
             LOGGER.info("Execução interrompida pelo usuário")
+        finally:
+            if self.args.display:
+                cv2.destroyAllWindows()
+
+    # ------------------------------- visualização
+    def _show_frame(
+        self,
+        frame: np.ndarray,
+        source: str,
+        bbox: Optional[tuple[int, int, int, int]],
+        overlay: dict[str, float | bool] | None,
+    ) -> None:
+        if not self.args.display:
+            return
+
+        view = frame.copy()
+        if bbox is not None:
+            x1, y1, x2, y2 = bbox
+            cv2.rectangle(view, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            if overlay:
+                label = f"fall {overlay.get('score', 0.0):.2f}"
+                cv2.putText(
+                    view,
+                    label,
+                    (x1, max(0, y1 - 10)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
+                info = (
+                    f"angle={overlay.get('angle', 0.0):.1f}° | "
+                    f"vy={overlay.get('vy', 0.0):.2f} | flat={overlay.get('flat_ratio', 0.0):.2f}"
+                )
+                cv2.putText(
+                    view,
+                    info,
+                    (10, view.shape[0] - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 255),
+                    1,
+                    cv2.LINE_AA,
+                )
+                if overlay.get("tcn"):
+                    cv2.putText(
+                        view,
+                        f"tcn={overlay['tcn']:.2f}",
+                        (10, view.shape[0] - 50),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (255, 255, 0),
+                        1,
+                        cv2.LINE_AA,
+                    )
+                if overlay.get("confirmed"):
+                    cv2.putText(
+                        view,
+                        "CONFIRMADO",
+                        (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.9,
+                        (0, 0, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+        cv2.putText(
+            view,
+            f"src={source}",
+            (10, 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.imshow(self.window_name, view)
+        cv2.waitKey(1)
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +586,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--use-tcn", action="store_true", help="Ativa o TCN treinado (ONNX)")
     parser.add_argument("--tcn-path", default="runs/models/tcn.onnx")
     parser.add_argument("--tcn-window", type=int, default=32, help="Tamanho da janela temporal")
+    parser.add_argument("--display", action="store_true", help="Exibe janela com as detecções")
     return parser
 
 

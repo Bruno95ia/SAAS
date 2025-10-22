@@ -1,109 +1,124 @@
-"""Configurações centrais do projeto SAAS.
-
-Este módulo concentra caminhos e utilidades de configuração que são
-compartilhadas pelos utilitários de captura e inferência. A ideia é manter
-em um único lugar as convenções de diretórios e a leitura de variáveis de
-ambiente, favorecendo organização e padronização.
-"""
+"""Configurações compartilhadas do projeto SAAS."""
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Dict
 
-# Diretórios principais -----------------------------------------------------
+# Diretórios -----------------------------------------------------------------
 
-# Base do projeto (../.. em relação a este arquivo localizado em src/saas).
-BASE_DIR = Path(__file__).resolve().parents[1]
+# ``config.py`` está localizado em ``src/saas``. Subindo duas pastas chegamos ao
+# diretório raiz do repositório (onde vivem ``runs/`` e ``events.db``).
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-# Estrutura de diretórios esperada.
-RUNS_DIR = BASE_DIR / "runs"
+RUNS_DIR = PROJECT_ROOT / "runs"
 BUFFER_DIR = RUNS_DIR / "buffer"
+CLIPS_DIR = RUNS_DIR / "clips"
 LOG_DIR = RUNS_DIR / "logs"
 RESULTS_DIR = RUNS_DIR / "results"
-WEIGHTS_DIR = BASE_DIR / "weights"
+WEIGHTS_DIR = PROJECT_ROOT / "weights"
+DATABASE_PATH = Path(os.getenv("SAAS_DB_PATH", PROJECT_ROOT / "events.db"))
 
-# Arquivo de log padrão.
 LOG_FILE = LOG_DIR / "saas.log"
 
-# Pesos padrão do YOLO (permite sobrescrever via variável de ambiente).
-DEFAULT_WEIGHTS = Path(
-    os.getenv("SAAS_YOLO_WEIGHTS", WEIGHTS_DIR / "yolov8n.pt")
-)
+DEFAULT_WEIGHTS = Path(os.getenv("SAAS_YOLO_WEIGHTS", WEIGHTS_DIR / "yolov8n.pt"))
 
 
-# Utilidades de ambiente ----------------------------------------------------
+# API ------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class APISettings:
-    """Configurações de conexão com a API de alertas."""
+    """Configurações básicas para autenticação na API."""
 
     url: str
     key: str
 
 
 def load_api_settings() -> APISettings:
-    """Carrega URL e chave de API a partir das variáveis de ambiente.
-
-    Defaults mantêm compatibilidade com instalações locais, mas recomenda-se
-    definir `SAAS_API_URL` e `SAAS_API_KEY` explicitamente em produção.
-    """
-
     url = os.getenv("SAAS_API_URL", "http://127.0.0.1:8000").rstrip("/")
     key = os.getenv("SAAS_API_KEY", "minha-chave-forte")
     return APISettings(url=url, key=key)
 
 
-# Funções auxiliares -------------------------------------------------------
+# Diretórios utilitários -----------------------------------------------------
 
 def ensure_runtime_directories() -> None:
-    """Garante que a estrutura de diretórios necessária exista."""
+    """Garante que a estrutura de diretórios esperada exista."""
 
-    for folder in (RUNS_DIR, BUFFER_DIR, LOG_DIR, RESULTS_DIR, WEIGHTS_DIR):
+    for folder in (RUNS_DIR, BUFFER_DIR, CLIPS_DIR, LOG_DIR, RESULTS_DIR, WEIGHTS_DIR):
         folder.mkdir(parents=True, exist_ok=True)
+
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 def default_buffer_dir(camera_id: str) -> Path:
-    """Retorna o diretório de buffer para uma câmera específica."""
-
     return BUFFER_DIR / camera_id
 
 
-def detect_source_type(identifier: str) -> str:
-    """Identifica o tipo da origem de vídeo a partir do argumento `--rtsp`.
+def segment_template(base_dir: Path) -> Path:
+    return base_dir / "%Y%m%d" / "%H%M%S.m4s"
 
-    - URLs iniciando com ``rtsp://`` são tratadas como câmeras remotas.
-    - Os valores ``screen`` e ``local`` ativam captura via AVFoundation
-      (típico em macOS para tela ou webcam integradas).
-    - Qualquer outro valor é retornado como ``custom`` para permitir
-      manipulação futura (ex.: arquivos de teste).
-    """
+
+# Fontes de vídeo ------------------------------------------------------------
+
+def detect_source_type(identifier: str) -> str:
+    """Classifica o tipo de origem usada na captura."""
 
     value = identifier.strip().lower()
     if value.startswith("rtsp://"):
         return "rtsp"
-    if value in {"screen", "local"}:
-        return value
+    if value.startswith("screen"):
+        return "screen"
+    if value.startswith("local"):
+        return "local"
     return "custom"
 
 
-def resolve_weights_path(candidate: str) -> Path:
-    """Resolve o caminho do arquivo de pesos YOLO com fallback local."""
+def _extract_options(source: str) -> str:
+    if source.startswith("rtsp://") or ":" not in source:
+        return ""
+    return source.split(":", 1)[1]
 
+
+def parse_source_options(source: str) -> Dict[str, str]:
+    """Interpreta pares ``chave=valor`` passados após o tipo da origem.
+
+    Exemplos
+    --------
+    ``screen:display=:0.0,size=1920x1080,fps=25``
+        → {"display":":0.0", "size":"1920x1080", "fps":"25"}
+
+    ``local:/dev/video2,fps=60``
+        → {"device":"/dev/video2", "fps":"60"}
+    """
+
+    options: Dict[str, str] = {}
+    raw = _extract_options(source)
+    if not raw:
+        return options
+
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "=" in token:
+            key, value = token.split("=", 1)
+            options[key.strip()] = value.strip()
+            continue
+        # Sem "=" → assume parâmetro principal (device/display)
+        if token and "device" not in options:
+            options["device"] = token
+        elif token and "display" not in options:
+            options["display"] = token
+    return options
+
+
+def resolve_weights_path(candidate: str) -> Path:
     candidate_path = Path(candidate)
     if candidate_path.is_file():
         return candidate_path
-
     if DEFAULT_WEIGHTS.is_file():
         return DEFAULT_WEIGHTS
-
-    # Caso nenhum arquivo seja encontrado, retornamos o caminho informado para
-    # permitir que a biblioteca `ultralytics` tente baixar automaticamente.
     return candidate_path
-
-
-def segment_template(base_dir: Path) -> Path:
-    """Retorna o template strftime usado para segmentação de vídeo."""
-
-    return base_dir / "%Y%m%d" / "%H%M%S.m4s"

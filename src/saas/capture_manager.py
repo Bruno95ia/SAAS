@@ -10,6 +10,7 @@ caso de falhas, registrando logs detalhados.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import subprocess
 import time
@@ -42,6 +43,8 @@ class CaptureManager:
         self.ffmpeg_binary = ffmpeg_binary
         self.ffprobe_binary = ffprobe_binary
         self.logger = get_logger(f"saas.capture.{camera_id}")
+        self.source_options = config.parse_source_options(source)
+        self.system = platform.system().lower()
 
         config.ensure_runtime_directories()
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -154,27 +157,12 @@ class CaptureManager:
                 "-c",
                 "copy",
             ]
-        elif self.source_type in {"screen", "local"}:
-            # Captura via AVFoundation (macOS). Ajuste dos dispositivos padrão:
-            device = "1:none" if self.source_type == "screen" else "0:none"
-            base_cmd += [
-                "-f",
-                "avfoundation",
-                "-framerate",
-                "30",
-                "-video_size",
-                "1280x720",
-                "-i",
-                device,
-                "-pix_fmt",
-                "yuv420p",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "23",
-            ]
+        elif self.source_type == "screen":
+            cmd = self._screen_capture_command()
+            base_cmd += cmd
+        elif self.source_type == "local":
+            cmd = self._local_capture_command()
+            base_cmd += cmd
         else:
             # Origens customizadas: delegamos a interpretação diretamente ao FFmpeg.
             base_cmd += [
@@ -198,6 +186,102 @@ class CaptureManager:
             template,
         ]
         return base_cmd
+
+    def _screen_capture_command(self) -> List[str]:
+        fps = self.source_options.get("fps", os.getenv("SAAS_SCREEN_FPS", "25"))
+        size = self.source_options.get("size", os.getenv("SAAS_SCREEN_SIZE", "1280x720"))
+        display = self.source_options.get(
+            "display", os.getenv("SAAS_SCREEN_DISPLAY", os.getenv("DISPLAY", ":0.0"))
+        )
+        offset = self.source_options.get("offset", os.getenv("SAAS_SCREEN_OFFSET", "+0,0"))
+
+        if self.system.startswith("darwin"):
+            device = self.source_options.get("device", "1:none")
+            return [
+                "-f",
+                "avfoundation",
+                "-framerate",
+                str(fps),
+                "-video_size",
+                size,
+                "-i",
+                device,
+                "-pix_fmt",
+                "yuv420p",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "23",
+            ]
+
+        # Linux (x11grab)
+        input_spec = f"{display}{offset}" if offset else display
+        return [
+            "-f",
+            "x11grab",
+            "-video_size",
+            size,
+            "-framerate",
+            str(fps),
+            "-i",
+            input_spec,
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+        ]
+
+    def _local_capture_command(self) -> List[str]:
+        fps = self.source_options.get("fps", os.getenv("SAAS_LOCAL_FPS", "30"))
+        size = self.source_options.get("size", os.getenv("SAAS_LOCAL_SIZE", "1280x720"))
+        device = self.source_options.get("device")
+
+        if self.system.startswith("darwin"):
+            device = device or "0:none"
+            return [
+                "-f",
+                "avfoundation",
+                "-framerate",
+                str(fps),
+                "-video_size",
+                size,
+                "-i",
+                device,
+                "-pix_fmt",
+                "yuv420p",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "23",
+            ]
+
+        device = device or "/dev/video0"
+        return [
+            "-f",
+            "v4l2",
+            "-framerate",
+            str(fps),
+            "-video_size",
+            size,
+            "-i",
+            device,
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+        ]
 
     def _log_ffmpeg_line(self, line: str) -> None:
         text = line.strip()

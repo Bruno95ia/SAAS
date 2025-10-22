@@ -5,3 +5,16 @@ ultralytics==8.3.27
 pyyaml>=6
 prometheus-client>=0.20
 requests>=2.31
+fastapi>=0.110
+uvicorn[standard]>=0.27
+streamlit>=1.32
+pandas>=2.1
+altair>=5.2
+loguru>=0.7
+pydantic>=2.6
+python-multipart>=0.0.9
+websocket-client>=1.7
+onnxruntime>=1.17
+moviepy>=1.0
+pytest>=8.1
+ruff>=0.3

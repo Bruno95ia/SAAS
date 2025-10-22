@@ -44,6 +44,8 @@ def build_argparser() -> argparse.ArgumentParser:
         default=5.0,
         help="Intervalo (s) antes de tentar reconectar após uma falha",
     )
+    parser.add_argument("--ffmpeg", default="ffmpeg", help="Binário do FFmpeg a ser utilizado")
+    parser.add_argument("--ffprobe", default="ffprobe", help="Binário do ffprobe (opcional)")
     return parser
 
 
@@ -62,6 +64,8 @@ def main() -> None:
         output_base=output_base,
         segment_seconds=args.segment,
         reconnect_seconds=args.reconnect,
+        ffmpeg_binary=args.ffmpeg,
+        ffprobe_binary=args.ffprobe,
     )
 
     logger.info(
@@ -70,6 +74,8 @@ def main() -> None:
         args.rtsp,
         manager.segment_template.parent,
     )
+    if manager.source_options:
+        logger.info("Opções de captura: %s", manager.source_options)
 
     manager.run()
 

@@ -1,73 +1,63 @@
-"""Utilitário de logging unificado.
-
-Este módulo fornece uma função `get_logger` que aplica uma configuração
-rotativa de arquivo (`runs/logs/saas.log`) e permite o uso consistente de logs
-em todos os componentes da aplicação.
-"""
+"""Integração centralizada de logs usando :mod:`loguru`."""
 
 from __future__ import annotations
 
 import logging
-from logging.handlers import RotatingFileHandler
-from typing import Optional
+import sys
+from loguru import logger as _logger
 
 from saas import config
 
-# Tamanho máximo de cada arquivo de log (~5 MB) com até 3 backups antigos.
-_MAX_BYTES = 5_000_000
-_BACKUP_COUNT = 3
-
-# Armazenamos o estado de configuração para evitar duplicidade de handlers.
-_configured = False
+_CONFIGURED = False
 
 
-def _build_handler() -> RotatingFileHandler:
-    """Cria o handler rotativo apontando para `runs/logs/saas.log`."""
+class _InterceptHandler(logging.Handler):
+    """Redireciona logs do ``logging`` padrão para o Loguru."""
+
+    def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover - cola técnica
+        try:
+            level = _logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+        frame, depth = logging.currentframe(), 2
+        while frame and frame.f_code.co_filename == logging.__file__:
+            frame = frame.f_back  # type: ignore[assignment]
+            depth += 1
+        _logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
+
+
+def configure_logging(level: str | int = "INFO") -> None:
+    """Configura os handlers globais apenas uma vez."""
+
+    global _CONFIGURED
+    if _CONFIGURED:
+        return
 
     config.ensure_runtime_directories()
     log_path = config.LOG_FILE
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    handler = RotatingFileHandler(
+    _logger.remove()
+    fmt = "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {extra[context]} | {message}"
+    _logger.add(sys.stdout, level=level, format=fmt, enqueue=True, backtrace=False, diagnose=False)
+    _logger.add(
         log_path,
-        maxBytes=_MAX_BYTES,
-        backupCount=_BACKUP_COUNT,
-        encoding="utf-8",
+        level=level,
+        format=fmt,
+        enqueue=True,
+        rotation="10 MB",
+        retention="14 days",
+        compression="zip",
     )
-    formatter = logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(name)s (%(filename)s:%(lineno)d) - %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S%z",
-    )
-    handler.setFormatter(formatter)
-    return handler
+
+    logging.basicConfig(handlers=[_InterceptHandler()], level=level, force=True)
+
+    _CONFIGURED = True
 
 
-def configure_logging(level: int = logging.INFO) -> None:
-    """Configura o logger raiz `saas` apenas uma vez."""
+def get_logger(name: str, level: str | int | None = None):
+    """Retorna uma instância do Loguru com o campo ``context`` preenchido."""
 
-    global _configured
-    if _configured:
-        return
-
-    handler = _build_handler()
-
-    root = logging.getLogger("saas")
-    root.setLevel(level)
-    root.addHandler(handler)
-    root.propagate = False
-
-    # Também configuramos o logger raiz global para garantir que bibliotecas
-    # externas (OpenCV, Ultralytics) escrevam no mesmo arquivo quando possível.
-    logging.basicConfig(level=level, handlers=[handler])
-
-    _configured = True
-
-
-def get_logger(name: str, level: Optional[int] = None) -> logging.Logger:
-    """Retorna um logger configurado com handler rotativo."""
-
-    configure_logging()
-    logger = logging.getLogger(name)
-    if level is not None:
-        logger.setLevel(level)
-    return logger
+    configure_logging(level or "INFO")
+    bound = _logger.bind(context=name)
+    return bound

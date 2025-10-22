@@ -121,6 +121,10 @@ with col2:
         )
         if avg_score is not None:
             st.caption(f"Score médio dos alertas de hoje: {avg_score:.2f}")
+        if "tcn_prob" in today.columns:
+            avg_tcn = today["tcn_prob"].dropna().mean()
+            if pd.notna(avg_tcn):
+                st.caption(f"Probabilidade média TCN: {avg_tcn:.2f}")
     else:
         st.info("Sem dados (ainda).")
 
@@ -132,6 +136,11 @@ with col1:
     data = data.drop_duplicates(subset=["id"], keep="first") if not data.empty else data
 
     if not data.empty:
+        if "extra" in data.columns:
+            extras = data["extra"].apply(lambda x: x if isinstance(x, dict) else {})
+            data["angle_deg"] = extras.apply(lambda d: d.get("angle_deg"))
+            data["vy_norm"] = extras.apply(lambda d: d.get("vy_norm"))
+            data["tcn_prob"] = extras.apply(lambda d: d.get("tcn_prob"))
         data["ts_dt"] = pd.to_datetime(data["ts"], errors="coerce")
         data["type_norm"] = data["type"].fillna("").str.lower()
 
@@ -173,11 +182,9 @@ with col1:
 
         st.write(f"{len(filtered)} alertas dentro dos filtros")
 
-        st.dataframe(
-            filtered[["id", "ts", "camera_id", "type", "score", "clip_path"]],
-            use_container_width=True,
-            height=360,
-        )
+        cols = ["id", "ts", "camera_id", "type", "score", "angle_deg", "vy_norm", "tcn_prob", "clip_path"]
+        available_cols = [c for c in cols if c in filtered.columns]
+        st.dataframe(filtered[available_cols], use_container_width=True, height=360)
 
         st.download_button(
             "Baixar CSV",
