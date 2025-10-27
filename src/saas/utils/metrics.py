@@ -1,21 +1,48 @@
-from typing import Iterable
+"""System and inference metrics utilities."""
+from __future__ import annotations
 
-def f1_score_framewise(y_true: Iterable[int], y_pred: Iterable[int]) -> float:
-    """
-    F1 binário simples em escala 0..1.
-    y_true/y_pred: iteráveis com 0/1.
-    """
-    tp = fp = fn = 0
-    for t, p in zip(y_true, y_pred):
-        if p == 1 and t == 1:
-            tp += 1
-        elif p == 1 and t == 0:
-            fp += 1
-        elif p == 0 and t == 1:
-            fn += 1
-    # precisão e recall com proteção a divisão por zero
-    precision = tp / (tp + fp) if (tp + fp) else 0.0
-    recall    = tp / (tp + fn) if (tp + fn) else 0.0
-    if precision + recall == 0:
-        return 0.0
-    return 2 * precision * recall / (precision + recall)
+import collections
+import psutil
+
+from dataclasses import dataclass
+from typing import Deque, Dict
+
+
+@dataclass
+class PerformanceSnapshot:
+    fps: float
+    frame_time: float
+
+
+class PerformanceTracker:
+    """Track moving average of frames per second for inference."""
+
+    def __init__(self, window: int = 60) -> None:
+        self.window = window
+        self._history: Deque[PerformanceSnapshot] = collections.deque(maxlen=window)
+
+    def observe(self, elapsed_seconds: float) -> float:
+        if elapsed_seconds <= 0:
+            return 0.0
+        fps = 1.0 / elapsed_seconds
+        self._history.append(PerformanceSnapshot(fps=fps, frame_time=elapsed_seconds))
+        return fps
+
+    def average_fps(self) -> float:
+        if not self._history:
+            return 0.0
+        return sum(snapshot.fps for snapshot in self._history) / len(self._history)
+
+
+class SystemMetricsCollector:
+    """Collect CPU, memory, disk usage metrics."""
+
+    @staticmethod
+    def collect() -> Dict[str, float]:
+        cpu = psutil.cpu_percent(interval=None)
+        memory = psutil.virtual_memory().percent
+        disk = psutil.disk_usage("/").percent
+        return {"cpu": cpu, "memory": memory, "disk": disk}
+
+
+__all__ = ["PerformanceSnapshot", "PerformanceTracker", "SystemMetricsCollector"]
