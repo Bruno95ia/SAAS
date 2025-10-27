@@ -1,32 +1,14 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-echo "🧹 Encerrando stack SAAS..."
-
-# ==========================
-# Parar processos ativos
-# ==========================
-pkill -f "uvicorn" 2>/dev/null || true
-pkill -f "streamlit" 2>/dev/null || true
+pkill -f "uvicorn saas.api" 2>/dev/null || true
+pkill -f "streamlit run" 2>/dev/null || true
+pkill -f "python -m saas.run_pipeline" 2>/dev/null || true
 pkill -f "mediamtx" 2>/dev/null || true
-pkill -f "capture_rstp" 2>/dev/null || true
-pkill -f "live_yolo" 2>/dev/null || true
 
-# ==========================
-# Confirmar encerramento
-# ==========================
-sleep 3
-echo "🧾 Processos restantes:"
-ps aux | egrep "uvicorn|streamlit|mediamtx|capture|yolo" | grep -v grep || true
+sleep 2
 
-# ==========================
-# Limpeza opcional de logs
-# ==========================
-if [ "$1" == "--clean" ]; then
-    echo "🧽 Limpando logs antigos..."
-    rm -f /var/log/saas_api.log /var/log/saas_panel.log /var/log/mediamtx.log 2>/dev/null || true
-    echo "🗑️ Logs removidos."
-fi
+echo "Processos SAAS ativos:" 
+ps aux | egrep "uvicorn|streamlit|saas.run_pipeline|mediamtx" | grep -v grep || echo "Nenhum processo SAAS em execução."
 
 echo "✅ Stack SAAS totalmente encerrada."
-

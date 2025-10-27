@@ -1,68 +1,84 @@
-from fastapi import FastAPI, Header, HTTPException, Request
+"""FastAPI application powering the SAAS proof of concept."""
+from __future__ import annotations
+
+import logging
 from datetime import datetime
-import sqlite3
-import os
-from saas import config
+from pathlib import Path
+from typing import List, Optional
 
-app = FastAPI()
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
-# Carrega a chave de API da variável de ambiente
-API_KEY = os.getenv("SAAS_API_KEY", "minha-chave-forte")
+from saas.config import get_settings
+from saas.utils import Alert, AlertStore, configure_logging
 
-DB_PATH = "events.db"
+configure_logging()
+LOGGER = logging.getLogger(__name__)
+settings = get_settings()
+alert_store = AlertStore(settings.alerts_db_path)
+uploads_dir = Path("/mnt/data/SAAS/uploads")
+uploads_dir.mkdir(parents=True, exist_ok=True)
+
+app = FastAPI(title="SAAS API", version="1.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-# ---------- Health Check ----------
+def get_api_key(x_api_key: Optional[str] = Header(None)) -> str:
+    if settings.api_key and x_api_key != settings.api_key:
+        raise HTTPException(status_code=401, detail="invalid api key")
+    return settings.api_key
+
+
+class AlertPayload(BaseModel):
+    camera: str = Field(..., description="Camera identifier")
+    label: str = Field(..., description="Detected label")
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    timestamp: Optional[float] = Field(None, description="Unix timestamp of the event")
+    frame_path: Optional[str] = Field(None, description="Path to the annotated frame")
+
+    def to_alert(self) -> Alert:
+        ts = self.timestamp or datetime.utcnow().timestamp()
+        return Alert(
+            camera=self.camera,
+            label=self.label,
+            confidence=self.confidence,
+            timestamp=ts,
+            frame_path=self.frame_path,
+        )
+
+
 @app.get("/health")
-def health():
-    return {"ok": True}
+def health() -> dict:
+    return {"status": "ok"}
 
 
-# ---------- Endpoint para registrar alertas ----------
-@app.post("/post-alert")
-async def post_alert(request: Request, x_api_key: str = Header(None, alias="X-API-Key")):
-    if x_api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="invalid api key")
-
-    data = await request.json()
-    camera = data.get("camera")
-    label = data.get("label")
-    confidence = data.get("confidence")
-    ts = datetime.utcnow().isoformat()
-
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        "CREATE TABLE IF NOT EXISTS events (camera TEXT, label TEXT, confidence REAL, ts TEXT)"
-    )
-    cursor.execute(
-        "INSERT INTO events (camera, label, confidence, ts) VALUES (?, ?, ?, ?)",
-        (camera, label, confidence, ts),
-    )
-    conn.commit()
-    conn.close()
-
-    return {"message": "Evento salvo", "data": data, "timestamp": ts}
-
-
-# ---------- Endpoint para listar alertas ----------
 @app.get("/alerts")
-def get_alerts(limit: int = 100, x_api_key: str = Header(None, alias="X-API-Key")):
-    if x_api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="invalid api key")
+def list_alerts(limit: int = 100, _: str = Depends(get_api_key)) -> List[dict]:
+    return [alert.to_dict() for alert in alert_store.list(limit=limit)]
 
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute(
-        "CREATE TABLE IF NOT EXISTS events (camera TEXT, label TEXT, confidence REAL, ts TEXT)"
-    )
-    cursor.execute(
-        "SELECT camera, label, confidence, ts FROM events ORDER BY ts DESC LIMIT ?",
-        (limit,),
-    )
-    rows = cursor.fetchall()
-    conn.close()
 
-    return [
-        {"camera": r[0], "label": r[1], "confidence": r[2], "ts": r[3]} for r in rows
-    ]
+@app.post("/alerts", status_code=201)
+def create_alert(payload: AlertPayload, _: str = Depends(get_api_key)) -> dict:
+    alert = payload.to_alert()
+    alert_store.add(alert)
+    LOGGER.info("Stored alert from %s (%s)", alert.camera, alert.label)
+    return alert.to_dict()
+
+
+@app.post("/upload")
+def upload_video(file: UploadFile = File(...), _: str = Depends(get_api_key)) -> dict:
+    target_path = uploads_dir / file.filename
+    with target_path.open("wb") as buffer:
+        buffer.write(file.file.read())
+    LOGGER.info("Uploaded file saved to %s", target_path)
+    return {"filename": file.filename, "path": str(target_path)}
+
+
+__all__ = ["app"]
