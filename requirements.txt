@@ -5,3 +5,9 @@ ultralytics==8.3.27
 pyyaml>=6
 prometheus-client>=0.20
 requests>=2.31
+fastapi>=0.110
+uvicorn[standard]>=0.24
+streamlit>=1.31
+pandas>=2.1
+schedule>=1.2
+hub-sdk>=0.0.24
